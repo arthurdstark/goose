@@ -9,7 +9,7 @@ use crate::providers::utils::{
 use anyhow::Result;
 use async_trait::async_trait;
 use mcp_core::tool::Tool;
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde_json::Value;
 use std::time::Duration;
 use url::Url;
@@ -77,10 +77,9 @@ impl GoogleProvider {
             .map_err(|e| {
                 ProviderError::RequestFailed(format!("Failed to construct endpoint URL: {e}"))
             })?;
-
-        let max_retries = 3;
+        let max_retries = 10;
         let mut retries = 0;
-        let base_delay = Duration::from_secs(2);
+        let base_delay = Duration::from_secs(4);
 
         loop {
             let response = self
@@ -93,31 +92,27 @@ impl GoogleProvider {
 
             match response {
                 Ok(res) => {
-                    match handle_response_google_compat(res).await {
-                        Ok(result) => return Ok(result),
-                        Err(ProviderError::RateLimitExceeded(_)) => {
-                            retries += 1;
-                            if retries > max_retries {
-                                return Err(ProviderError::RateLimitExceeded(
-                                    "Max retries exceeded for rate limit error".to_string(),
-                                ));
-                            }
-
-                            let delay = 2u64.pow(retries);
-                            let total_delay = Duration::from_secs(delay) + base_delay;
-
-                            println!("Rate limit hit. Retrying in {:?}", total_delay);
-                            tokio::time::sleep(total_delay).await;
-                            continue;
+                    if res.status() == StatusCode::TOO_MANY_REQUESTS {
+                        retries += 1;
+                        if retries > max_retries {
+                            return Err(ProviderError::RateLimitExceeded(
+                                "Max retries exceeded".to_string(),
+                            ));
                         }
-                        Err(err) => return Err(err), // Other errors
+
+                        let delay = 2u64.pow(retries);
+                        let total_delay = Duration::from_secs(delay) + base_delay;
+
+                        println!("Rate limit hit. Retrying in {:?}", total_delay);
+                        tokio::time::sleep(total_delay).await;
+                        continue;
+                    } else {
+                        // Successful response or other non-rate-limit error
+                        return handle_response_google_compat(res).await;
                     }
                 }
                 Err(err) => {
-                    return Err(ProviderError::RequestFailed(format!(
-                        "Request failed: {}",
-                        err
-                    )));
+                    return Err(ProviderError::RequestFailed(format!("Request failed: {}", err)));
                 }
             }
         }
